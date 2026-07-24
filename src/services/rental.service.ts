@@ -146,6 +146,7 @@ export class RentalService {
               storeId,
               amount: payment.amount,
               rentalDate: now.toISOString(),
+              version: 1, // version inicial del agregado
             },
             // status, attempts, created_at → defaults
           }),

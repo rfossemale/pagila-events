@@ -14,6 +14,7 @@ export class OutboxRelayService {
   private readonly logger = new Logger(OutboxRelayService.name);
   constructor(private readonly dataSource: DataSource) {}
 
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
   @Interval(2000)
   async tick() {
     await this.dataSource.transaction(async (em) => {
@@ -50,5 +51,17 @@ export class OutboxRelayService {
     this.logger.log(
       `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
     );
+    await fetch('http://localhost:3001/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: row.id,
+        eventType: row.event_type,
+        aggregateId: row.aggregate_id,
+        payload: row.payload,
+      }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`consumer respondió ${r.status}`);
+    });
   }
 }
