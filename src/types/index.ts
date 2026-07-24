@@ -5,5 +5,6 @@ export type IncomingEvent = {
   payload: {
     filmId?: number;
     storeId?: number;
+    version?: number;
   };
 };
