@@ -30,6 +30,7 @@ import { OutboxRelayService } from './services/outbox/outbox-relay.service';
 import { OutboxMetricsService } from './services/outbox/outbox-metrics.service';
 import { RentalQueueService } from './queues/rental-queue.service';
 import { HealthController } from './controllers/health.controller';
+import { OutboxController } from './controllers/outbox.controller';
 import { OutboxCleanup } from './services/outbox/outbox-cleanup.service';
 
 const entities = [
@@ -73,6 +74,7 @@ const entities = [
     FilmController,
     RentalController,
     HealthController,
+    OutboxController,
   ],
   providers: [
     AppService,

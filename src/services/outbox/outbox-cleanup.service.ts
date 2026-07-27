@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-assignment */
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { DataSource } from 'typeorm';
@@ -9,10 +8,11 @@ export class OutboxCleanup {
   constructor(private readonly dataSource: DataSource) {}
 
   @Cron('0 3 * * *') // 3am, baja carga
-  async purge() {
+  async purge(): Promise<{ deleted: number }> {
     let total = 0;
     for (;;) {
-      const res = await this.dataSource.query(`
+      // pg (via TypeORM.query) devuelve [rows, rowCount] para DELETE sin RETURNING.
+      const res = await this.dataSource.query<[unknown[], number]>(`
         DELETE FROM outbox
         WHERE id IN (
           SELECT id FROM outbox
@@ -21,11 +21,12 @@ export class OutboxCleanup {
           LIMIT 5000
         )
       `);
-      const deleted = res[1] ?? 0; // pg devuelve [rows, rowCount]
+      const deleted = res[1] ?? 0;
       total += deleted;
       if (deleted === 0) break;
       await new Promise((r) => setTimeout(r, 200));
     }
     this.logger.log(`purge: ${total} filas eliminadas`);
+    return { deleted: total };
   }
 }

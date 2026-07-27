@@ -1,6 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access */
-/* eslint-disable @typescript-eslint/no-unsafe-call */
-import { Client, type ClientConfig } from 'pg';
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
@@ -16,42 +13,13 @@ type OutboxRow = {
 @Injectable()
 export class OutboxRelayService {
   private readonly logger = new Logger(OutboxRelayService.name);
-  private running = false;
   constructor(
     private readonly dataSource: DataSource,
     private readonly rentalQueue: RentalQueueService,
   ) {}
 
-  async onModuleInit() {
-    const clientConfig: ClientConfig = {
-      host: process.env.DB_HOST ?? 'localhost',
-      port: Number(process.env.DB_PORT ?? 5433),
-      user: process.env.DB_USER ?? 'pagila',
-      password: process.env.DB_PASSWORD ?? 'pagila',
-      database: process.env.DB_NAME ?? 'pagila',
-    };
-    // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
-    const client: Client = new Client(clientConfig);
-    await client.connect();
-    await client.query('LISTEN outbox_new');
-    client.on('notification', () => this.triggerCycle());
-  }
-
-  @Interval(30000) // red de seguridad
-  async onTimer() {
-    await this.triggerCycle();
-  }
-
-  private async triggerCycle() {
-    if (this.running) return; // no acumular ciclos
-    this.running = true;
-    try {
-      await this.tick();
-    } finally {
-      this.running = false;
-    }
-  }
-
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call
+  @Interval(2000)
   async tick() {
     await this.dataSource.transaction(async (em) => {
       const queryResult: unknown = await em.query(`
@@ -68,16 +36,14 @@ export class OutboxRelayService {
 
       for (const row of rows) {
         try {
-          await this.publish(row);
+          await this.publish(row); // por ahora: console.log
           await em.query(
             `UPDATE outbox SET status='published', published_at=now() WHERE id=$1`,
             [row.id],
           );
-        } catch (err: unknown) {
-          const errorMessage =
-            err instanceof Error ? err.message : JSON.stringify(err);
+        } catch (err) {
           this.logger.error(
-            `Error publicando evento ${row.event_type} ${row.aggregate_id}: ${errorMessage}`,
+            `Error publicando evento ${row.event_type} ${row.aggregate_id}: ${err}`,
           );
           //  await this.handleFailure(em, row, err);
         }
