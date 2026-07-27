@@ -3,23 +3,28 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { InventoryAvailability } from './entities/inventory-availability.entity';
+import { AggregateVersion } from './entities/aggregate-version.entity';
+import { ProcessedEvent } from './entities/processed-event.entity';
+import { EventProcessorService } from './services/event-processor.service';
+import { RentalWorkerService } from './queues/rental-worker.service';
+
+const entities = [InventoryAvailability, AggregateVersion, ProcessedEvent];
 
 @Module({
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',
-      host: 'localhost',
-      port: 5433,
-      username: 'pagila',
-      password: 'pagila',
-      database: 'pagila',
-      entities: [InventoryAvailability],
+      host: process.env.DB_HOST ?? 'localhost',
+      port: Number(process.env.DB_PORT ?? 5433),
+      username: process.env.DB_USER ?? 'pagila',
+      password: process.env.DB_PASSWORD ?? 'pagila',
+      database: process.env.DB_NAME ?? 'pagila',
+      entities,
       synchronize: false,
     }),
-    TypeOrmModule.forFeature([InventoryAvailability]),
+    TypeOrmModule.forFeature(entities),
   ],
   controllers: [AppController],
-  providers: [AppService],
-  exports: [TypeOrmModule.forFeature([InventoryAvailability])],
+  providers: [AppService, EventProcessorService, RentalWorkerService],
 })
 export class AppModule {}
