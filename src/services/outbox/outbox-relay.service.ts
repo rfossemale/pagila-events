@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
+import { RentalQueueService } from '../../queues/rental-queue.service';
 
 type OutboxRow = {
   id: string;
@@ -12,7 +13,10 @@ type OutboxRow = {
 @Injectable()
 export class OutboxRelayService {
   private readonly logger = new Logger(OutboxRelayService.name);
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly rentalQueue: RentalQueueService,
+  ) {}
 
   // eslint-disable-next-line @typescript-eslint/no-unsafe-call
   @Interval(2000)
@@ -47,21 +51,41 @@ export class OutboxRelayService {
     });
   }
 
+  //   private async publish(row: OutboxRow) {
+  //     this.logger.log(
+  //       `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
+  //     );
+  //     await fetch('http://localhost:3001/events', {
+  //       method: 'POST',
+  //       headers: { 'Content-Type': 'application/json' },
+  //       body: JSON.stringify({
+  //         eventId: row.id,
+  //         eventType: row.event_type,
+  //         aggregateId: row.aggregate_id,
+  //         payload: row.payload,
+  //       }),
+  //     }).then((r) => {
+  //       if (!r.ok) throw new Error(`consumer respondió ${r.status}`);
+  //     });
+  //   }
+  // }
   private async publish(row: OutboxRow) {
     this.logger.log(
       `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
     );
-    await fetch('http://localhost:3001/events', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+    await this.rentalQueue.add(
+      row.event_type,
+      {
         eventId: row.id,
         eventType: row.event_type,
         aggregateId: row.aggregate_id,
         payload: row.payload,
-      }),
-    }).then((r) => {
-      if (!r.ok) throw new Error(`consumer respondió ${r.status}`);
-    });
+      },
+      {
+        jobId: row.id, // ← clave: dedup a nivel cola
+        attempts: 5,
+        backoff: { type: 'exponential', delay: 1000 },
+      },
+    );
   }
 }

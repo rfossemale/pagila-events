@@ -11,7 +11,11 @@ import { Film } from '../entities/film.entity';
 import { Payment } from '../entities/payment.entity';
 import { Rental } from '../entities/rental.entity';
 import { Outbox } from '../entities/outbox.entity';
-import { CreateRentalDto, CreateRentalResult } from '../dto/create-rental.dto';
+import {
+  CreateRentalDto,
+  CreateRentalResult,
+  ReturnRentalResult,
+} from '../dto/create-rental.dto';
 
 @Injectable()
 export class RentalService {
@@ -182,5 +186,89 @@ export class RentalService {
     if (typeof value !== 'number' || !Number.isInteger(value) || value <= 0) {
       throw new BadRequestException(`${name} debe ser un entero positivo`);
     }
+  }
+
+  /**
+   * Devuelve un ejemplar alquilado: setea `return_date = now()` en el rental
+   * y emite un evento `RentalReturned` v2 al outbox.
+   *
+   * Concurrencia: se bloquea la fila del rental con `FOR UPDATE` para evitar
+   * doble-return concurrente (dos requests marcando la misma devolución →
+   * dos eventos v2 → el consumer aplicaría el +1 dos veces).
+   */
+  async returnRental(rentalId: number): Promise<ReturnRentalResult> {
+    this.assertPositiveInt(rentalId, 'rentalId');
+
+    return this.dataSource.transaction('READ COMMITTED', async (em) => {
+      // 1) Lock del rental + JOIN a inventory para conocer film/store.
+      //    FOR UPDATE OF r: solo bloqueamos la fila del rental.
+      const rows = await em.query<
+        Array<{
+          rental_id: number;
+          inventory_id: number;
+          return_date: Date | null;
+          film_id: number;
+          store_id: number;
+        }>
+      >(
+        `
+        SELECT r.rental_id, r.inventory_id, r.return_date,
+               i.film_id, i.store_id
+        FROM rental r
+        JOIN inventory i ON i.inventory_id = r.inventory_id
+        WHERE r.rental_id = $1
+        FOR UPDATE OF r
+        `,
+        [rentalId],
+      );
+
+      if (rows.length === 0) {
+        throw new NotFoundException(`Rental ${rentalId} no encontrado`);
+      }
+      const row = rows[0];
+
+      if (row.return_date !== null) {
+        throw new ConflictException(
+          `Rental ${rentalId} ya fue devuelto el ${row.return_date.toISOString()}`,
+        );
+      }
+
+      // 2) Marcar como devuelto. La UNIQUE INDEX parcial
+      //    uq_inventory_active_rental "libera" el ejemplar automáticamente
+      //    (deja de estar en el predicado WHERE return_date IS NULL).
+      const now = new Date();
+      await em
+        .getRepository(Rental)
+        .update({ rentalId }, { returnDate: now, lastUpdate: now });
+
+      // 3) Evento RentalReturned v2 al outbox (misma tx).
+      await em.getRepository(Outbox).save(
+        em.getRepository(Outbox).create({
+          aggregateType: 'Rental',
+          aggregateId: String(rentalId),
+          eventType: 'RentalReturned',
+          payload: {
+            rentalId,
+            inventoryId: row.inventory_id,
+            filmId: row.film_id,
+            storeId: row.store_id,
+            returnDate: now.toISOString(),
+            version: 2, // v1 = RentalStarted; v2 = RentalReturned
+          },
+        }),
+      );
+
+      this.logger.log(
+        `Rental ${rentalId} devuelto: inventory=${row.inventory_id}, film=${row.film_id}, store=${row.store_id}`,
+      );
+
+      return {
+        rentalId,
+        inventoryId: row.inventory_id,
+        filmId: row.film_id,
+        storeId: row.store_id,
+        returnDate: now,
+      };
+    });
   }
 }

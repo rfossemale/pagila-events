@@ -26,7 +26,11 @@ import { FilmController } from './controllers/films.controllers';
 import { FilmService } from './services/film.service';
 import { RentalController } from './controllers/rental.controller';
 import { RentalService } from './services/rental.service';
-import { OutboxRelayService } from './services/relay/outbox-relay.service';
+import { OutboxRelayService } from './services/outbox/outbox-relay.service';
+import { OutboxMetricsService } from './services/outbox/outbox-metrics.service';
+import { RentalQueueService } from './queues/rental-queue.service';
+import { HealthController } from './controllers/health.controller';
+import { OutboxCleanup } from './services/outbox/outbox-cleanup.service';
 
 const entities = [
   Film,
@@ -51,11 +55,11 @@ const entities = [
   imports: [
     TypeOrmModule.forRoot({
       type: 'postgres',
-      host: 'localhost',
-      port: 5433,
-      username: 'pagila',
-      password: 'pagila',
-      database: 'pagila',
+      host: process.env.DB_HOST ?? 'localhost',
+      port: Number(process.env.DB_PORT ?? 5433),
+      username: process.env.DB_USER ?? 'pagila',
+      password: process.env.DB_PASSWORD ?? 'pagila',
+      database: process.env.DB_NAME ?? 'pagila',
       entities,
       synchronize: false, // innegociable con esquema legacy
       logging: ['query', 'error'],
@@ -68,6 +72,7 @@ const entities = [
     ActorController,
     FilmController,
     RentalController,
+    HealthController,
   ],
   providers: [
     AppService,
@@ -75,6 +80,9 @@ const entities = [
     FilmService,
     RentalService,
     OutboxRelayService,
+    OutboxMetricsService,
+    OutboxCleanup,
+    RentalQueueService,
   ],
 })
 export class AppModule {}
