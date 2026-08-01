@@ -7,6 +7,7 @@ import { AggregateVersion } from './entities/aggregate-version.entity';
 import { ProcessedEvent } from './entities/processed-event.entity';
 import { EventProcessorService } from './services/event-processor.service';
 import { RentalWorkerService } from './queues/rental-worker.service';
+import { SagaModule } from './saga/saga.module';
 
 const entities = [InventoryAvailability, AggregateVersion, ProcessedEvent];
 
@@ -23,6 +24,7 @@ const entities = [InventoryAvailability, AggregateVersion, ProcessedEvent];
       synchronize: false,
     }),
     TypeOrmModule.forFeature(entities),
+    SagaModule,
   ],
   controllers: [AppController],
   providers: [AppService, EventProcessorService, RentalWorkerService],
