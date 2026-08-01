@@ -18,6 +18,7 @@ import { Address } from './entities/address.entity';
 import { City } from './entities/city.entity';
 import { Country } from './entities/country.entity';
 import { Outbox } from './entities/outbox.entity';
+import { SagaInstance } from './saga/entities/saga-instance.entity';
 import { ScheduleModule } from '@nestjs/schedule';
 
 import { ActorController } from './controllers/actor.controller';
@@ -32,7 +33,10 @@ import { RentalQueueService } from './queues/rental-queue.service';
 import { HealthController } from './controllers/health.controller';
 import { OutboxController } from './controllers/outbox.controller';
 import { OutboxCleanup } from './services/outbox/outbox-cleanup.service';
+import { SagaModule } from './saga/saga.module';
 
+// SagaInstance queda en el root sólo para que el DataSource la descubra;
+// su repo, controller y providers viven en SagaModule.
 const entities = [
   Film,
   Actor,
@@ -50,6 +54,7 @@ const entities = [
   City,
   Country,
   Outbox,
+  SagaInstance,
 ];
 
 @Module({
@@ -67,6 +72,7 @@ const entities = [
     }),
     TypeOrmModule.forFeature(entities),
     ScheduleModule.forRoot(),
+    SagaModule,
   ],
   controllers: [
     AppController,
