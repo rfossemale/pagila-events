@@ -9,16 +9,21 @@ import {
 /**
  * Estado del ciclo de vida de la saga.
  *  - running: hay un step local por ejecutar → advance() lo procesa.
- *  - awaiting_step_response: dispatch de comando remoto hecho; la saga
- *    duerme hasta que llegue la respuesta por `saga-replies`.
- *  - completed: todos los steps corrieron ok (happy path).
- *  - compensating / failed: reservados para la iteración de compensación.
+ *  - awaiting_step_response: dispatch de comando forward remoto hecho;
+ *    la saga duerme hasta que llegue la respuesta por `saga-replies`.
+ *  - compensating: se está caminando `completed_steps` al revés
+ *    ejecutando compensaciones locales.
+ *  - awaiting_compensation_response: dispatch de comando de
+ *    compensación remoto hecho; espera la respuesta.
+ *  - completed: happy path terminado.
+ *  - failed: compensación terminada (saga abortada).
  */
 export type SagaStatus =
   | 'running'
   | 'awaiting_step_response'
-  | 'completed'
   | 'compensating'
+  | 'awaiting_compensation_response'
+  | 'completed'
   | 'failed';
 
 @Entity({ name: 'saga_instance' })

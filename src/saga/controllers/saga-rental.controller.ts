@@ -18,7 +18,7 @@ export class SagaRentalController {
 
   @Post()
   @HttpCode(202)
-  start(@Body() body: CreateRentalDto) {
+  start(@Body() body: CreateRentalDto & { simulateFailure?: 'chargePayment' }) {
     return this.orchestrator.start(body);
   }
 

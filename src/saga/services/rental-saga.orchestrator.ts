@@ -9,19 +9,21 @@ import { DataSource, EntityManager } from 'typeorm';
 import { Film } from '../../entities/film.entity';
 import { Payment } from '../../entities/payment.entity';
 import { Rental } from '../../entities/rental.entity';
-import { SagaInstance } from '../entities/saga-instance.entity';
+import { SagaInstance, SagaStatus } from '../entities/saga-instance.entity';
 import { SagaCommandQueueService } from '../queues/saga-command-queue.service';
 import type { SagaReply } from '../queues/saga-reply-worker.service';
 
 /**
- * Definición declarativa de un step. Para el happy path solo distinguimos:
- *  - `kind: 'local'` → corre `action(em, payload)` en una transacción y
- *    devuelve un patch que se mergea al payload de la saga.
- *  - `kind: 'remote'` → se dispatcha un comando por `saga-commands`; la
- *    saga queda `awaiting_step_response` hasta que el reply-worker la
- *    despierte con `handleReply()`.
+ * Definición declarativa de un step.
+ *  - `kind: 'local'`  → `action` corre en tx; `compensation` (opcional)
+ *    revierte en tx.
+ *  - `kind: 'remote'` → se dispatcha `command` por `saga-commands` y la
+ *    saga queda `awaiting_step_response`. Si tiene
+ *    `compensationCommand`, la compensación dispatcha ese comando y la
+ *    saga queda `awaiting_compensation_response`.
  *
- * La compensación se declarará en una próxima iteración.
+ * `completed_steps` actúa como un stack: durante compensación se camina
+ * al revés y se hace pop por cada compensación exitosa.
  */
 type LocalStep = {
   name: string;
@@ -30,17 +32,24 @@ type LocalStep = {
     em: EntityManager,
     payload: RentalSagaPayload,
   ) => Promise<Partial<RentalSagaPayload>>;
+  compensation?: (
+    em: EntityManager,
+    payload: RentalSagaPayload,
+  ) => Promise<void>;
 };
 type RemoteStep = {
   name: string;
   kind: 'remote';
   command: string;
   buildCommand: (payload: RentalSagaPayload) => Record<string, unknown>;
+  compensationCommand?: string;
+  buildCompensationCommand?: (
+    payload: RentalSagaPayload,
+  ) => Record<string, unknown>;
 };
 type SagaStep = LocalStep | RemoteStep;
 
 export interface RentalSagaPayload {
-  // input
   filmId: number;
   storeId: number;
   customerId: number;
@@ -50,6 +59,19 @@ export interface RentalSagaPayload {
   inventoryId?: number;
   amount?: number;
   paymentId?: number;
+  // fault injection educativo
+  simulateFailure?: 'chargePayment';
+}
+
+/** Shape de las filas crudas de `saga_instance` (snake_case). */
+interface SagaRow {
+  id: string;
+  saga_type: string;
+  status: SagaStatus;
+  current_step: number;
+  payload: RentalSagaPayload;
+  completed_steps: string[];
+  last_error: string | null;
 }
 
 @Injectable()
@@ -61,12 +83,15 @@ export class RentalSagaOrchestrator {
       name: 'createRental',
       kind: 'local',
       action: (em, p) => this.createRental(em, p),
+      compensation: (em, p) => this.cancelRental(em, p),
     },
     {
       name: 'reserveStock',
       kind: 'remote',
       command: 'ReserveStock',
-      buildCommand: (p) => ({
+      buildCommand: (p) => ({ filmId: p.filmId, storeId: p.storeId }),
+      compensationCommand: 'ReleaseStock',
+      buildCompensationCommand: (p) => ({
         filmId: p.filmId,
         storeId: p.storeId,
       }),
@@ -75,6 +100,7 @@ export class RentalSagaOrchestrator {
       name: 'chargePayment',
       kind: 'local',
       action: (em, p) => this.chargePayment(em, p),
+      compensation: (em, p) => this.refundPayment(em, p),
     },
   ];
 
@@ -85,19 +111,19 @@ export class RentalSagaOrchestrator {
 
   // ─── entry point ──────────────────────────────────────────────────────
 
-  async start(input: {
-    filmId: number;
-    storeId: number;
-    customerId: number;
-    staffId: number;
-  }): Promise<{ sagaId: string; status: string }> {
-    const saga = await this.dataSource.getRepository(SagaInstance).save({
-      sagaType: 'RentalSaga',
-      status: 'running',
-      currentStep: 0,
-      payload: input,
-      completedSteps: [],
-    });
+  async start(
+    input: RentalSagaPayload,
+  ): Promise<{ sagaId: string; status: SagaStatus }> {
+    const repo = this.dataSource.getRepository(SagaInstance);
+    const saga = await repo.save(
+      repo.create({
+        sagaType: 'RentalSaga',
+        status: 'running',
+        currentStep: 0,
+        payload: input as unknown as Record<string, unknown>,
+        completedSteps: [],
+      }),
+    );
 
     this.logger.log(`saga ${saga.id} iniciada`);
 
@@ -114,11 +140,10 @@ export class RentalSagaOrchestrator {
   // ─── loop principal ───────────────────────────────────────────────────
 
   async advance(sagaId: string): Promise<void> {
-    // Cargamos fuera de tx para el dispatch, pero cada step local
-    // se ejecuta con `SELECT ... FOR UPDATE` sobre saga_instance para
-    // serializar advances concurrentes (worker HTTP + reply-worker).
     const saga = await this.loadSaga(sagaId);
     if (!saga) throw new NotFoundException(`saga ${sagaId} no existe`);
+
+    if (saga.status === 'compensating') return this.compensate(sagaId);
     if (saga.status !== 'running') {
       this.logger.log(
         `saga ${sagaId} no está running (status=${saga.status}), skip`,
@@ -137,65 +162,67 @@ export class RentalSagaOrchestrator {
     );
 
     if (step.kind === 'local') {
-      await this.runLocalStep(sagaId, step);
-      // seguimos avanzando en el mismo tick
-      await this.advance(sagaId);
-    } else {
-      await this.dispatchRemoteStep(sagaId, step);
-      // no llamamos advance; el reply-worker despierta la saga
+      const ok = await this.runLocalStep(sagaId, step);
+      return ok ? this.advance(sagaId) : this.compensate(sagaId);
     }
+
+    await this.dispatchRemoteStep(sagaId, step);
+    // no llamamos advance; el reply-worker despierta la saga
   }
 
-  // ─── steps locales ────────────────────────────────────────────────────
+  // ─── forward: local ───────────────────────────────────────────────────
 
-  private async runLocalStep(sagaId: string, step: LocalStep): Promise<void> {
-    await this.dataSource.transaction(async (em) => {
-      // Lock pesimista sobre la saga → evita que dos advances corran el
-      // mismo step en paralelo.
-      const [saga] = await em.query(
-        `SELECT * FROM saga_instance WHERE id = $1 FOR UPDATE`,
-        [sagaId],
-      );
+  private async runLocalStep(
+    sagaId: string,
+    step: LocalStep,
+  ): Promise<boolean> {
+    try {
+      await this.dataSource.transaction(async (em) => {
+        const saga = await this.lockSaga(em, sagaId);
+        if (!saga || saga.status !== 'running') return;
+        if (saga.completed_steps.includes(step.name)) return; // idempotencia
 
-      if (!saga || saga.status !== 'running') return;
-      if (saga.completed_steps.includes(step.name)) return; // idempotencia
+        const patch = await step.action(em, saga.payload);
+        const newPayload = { ...saga.payload, ...patch };
+        const newCompleted = [...saga.completed_steps, step.name];
+        const nextStep = saga.current_step + 1;
+        const nextStatus: SagaStatus =
+          nextStep >= this.steps.length ? 'completed' : 'running';
 
-      const patch = await step.action(em, saga.payload);
-      const newPayload = { ...saga.payload, ...patch };
-      const newCompleted = [...saga.completed_steps, step.name];
-      const nextStep = saga.current_step + 1;
-      const nextStatus =
-        nextStep >= this.steps.length ? 'completed' : 'running';
+        await em.query(
+          `UPDATE saga_instance
+              SET payload = $2,
+                  completed_steps = $3::jsonb,
+                  current_step = $4,
+                  status = $5,
+                  updated_at = now()
+            WHERE id = $1`,
+          [
+            sagaId,
+            newPayload,
+            JSON.stringify(newCompleted),
+            nextStep,
+            nextStatus,
+          ],
+        );
 
-      await em.query(
-        `UPDATE saga_instance
-            SET payload = $2,
-                completed_steps = $3::jsonb,
-                current_step = $4,
-                status = $5,
-                updated_at = now()
-          WHERE id = $1`,
-        [
-          sagaId,
-          newPayload,
-          JSON.stringify(newCompleted),
-          nextStep,
-          nextStatus,
-        ],
-      );
-
-      this.logger.log(
-        `saga ${sagaId} ✓ ${step.name} → step=${nextStep}, status=${nextStatus}`,
-      );
-    });
+        this.logger.log(
+          `saga ${sagaId} ✓ ${step.name} → step=${nextStep}, status=${nextStatus}`,
+        );
+      });
+      return true;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.logger.warn(`saga ${sagaId} ✗ ${step.name}: ${msg}`);
+      await this.markCompensating(sagaId, `${step.name}: ${msg}`);
+      return false;
+    }
   }
 
   private async createRental(
     em: EntityManager,
     p: RentalSagaPayload,
   ): Promise<Partial<RentalSagaPayload>> {
-    // 1) reservar un inventory disponible con lock (misma lógica que
-    // RentalService.createRental — sin duplicar el path del outbox).
     const rows = await em.query<Array<{ inventory_id: number }>>(
       `
       SELECT i.inventory_id
@@ -220,15 +247,12 @@ export class RentalSagaOrchestrator {
     }
     const inventoryId = rows[0].inventory_id;
 
-    // 2) tarifa
     const film = await em.getRepository(Film).findOne({
       where: { filmId: p.filmId },
       select: { filmId: true, rentalRate: true },
     });
     if (!film) throw new NotFoundException(`film ${p.filmId} no encontrado`);
 
-    // 3) crear rental en estado pending (la confirmación se hace en el
-    // step final `chargePayment`).
     const rentalRepo = em.getRepository(Rental);
     const now = new Date();
     const rental = await rentalRepo.save(
@@ -259,6 +283,9 @@ export class RentalSagaOrchestrator {
     if (p.rentalId == null || p.amount == null) {
       throw new Error('chargePayment: falta rentalId o amount en el payload');
     }
+    if (p.simulateFailure === 'chargePayment') {
+      throw new Error('simulated failure at chargePayment');
+    }
 
     const paymentRepo = em.getRepository(Payment);
     const now = new Date();
@@ -280,20 +307,49 @@ export class RentalSagaOrchestrator {
     return { paymentId: payment.paymentId };
   }
 
-  // ─── step remoto ──────────────────────────────────────────────────────
+  // ─── compensaciones locales ───────────────────────────────────────────
+
+  private async cancelRental(
+    em: EntityManager,
+    p: RentalSagaPayload,
+  ): Promise<void> {
+    if (p.rentalId == null) return;
+    // return_date=now() libera el UNIQUE parcial `uq_inventory_active_rental`.
+    await em.query(
+      `UPDATE rental
+          SET status = 'cancelled',
+              return_date = now(),
+              last_update = now()
+        WHERE rental_id = $1 AND return_date IS NULL`,
+      [p.rentalId],
+    );
+  }
+
+  private async refundPayment(
+    em: EntityManager,
+    p: RentalSagaPayload,
+  ): Promise<void> {
+    if (p.paymentId != null) {
+      await em.query(`DELETE FROM payment WHERE payment_id = $1`, [
+        p.paymentId,
+      ]);
+    }
+    if (p.rentalId != null) {
+      await em.query(
+        `UPDATE rental SET status = 'pending' WHERE rental_id = $1`,
+        [p.rentalId],
+      );
+    }
+  }
+
+  // ─── forward: remoto ──────────────────────────────────────────────────
 
   private async dispatchRemoteStep(
     sagaId: string,
     step: RemoteStep,
   ): Promise<void> {
-    // 1) marcar la saga como esperando respuesta antes de encolar,
-    // así el reply-worker nunca ve un estado inconsistente aunque el
-    // consumer responda muy rápido.
     await this.dataSource.transaction(async (em) => {
-      const [saga] = await em.query(
-        `SELECT * FROM saga_instance WHERE id = $1 FOR UPDATE`,
-        [sagaId],
-      );
+      const saga = await this.lockSaga(em, sagaId);
       if (!saga || saga.status !== 'running') return;
 
       await em.query(
@@ -313,9 +369,12 @@ export class RentalSagaOrchestrator {
         sagaId,
         step: step.name,
         command: step.command,
-        payload: step.buildCommand(saga.payload),
+        phase: 'forward' as const,
+        payload: step.buildCommand(
+          saga.payload as unknown as RentalSagaPayload,
+        ),
       },
-      { jobId: `${sagaId}:${step.name}` }, // dedup natural
+      { jobId: `${sagaId}:${step.name}:forward` },
     );
 
     this.logger.log(
@@ -323,28 +382,177 @@ export class RentalSagaOrchestrator {
     );
   }
 
+  // ─── compensación ─────────────────────────────────────────────────────
+
+  private async compensate(sagaId: string): Promise<void> {
+    const saga = await this.loadSaga(sagaId);
+    if (!saga) return;
+    if (saga.status !== 'compensating') return;
+
+    if (saga.completedSteps.length === 0) {
+      await this.markFailed(sagaId);
+      return;
+    }
+
+    const lastName = saga.completedSteps[saga.completedSteps.length - 1];
+    const step = this.steps.find((s) => s.name === lastName);
+    if (!step) {
+      this.logger.error(
+        `saga ${sagaId}: step "${lastName}" no está declarado, no puedo compensar`,
+      );
+      await this.markFailed(sagaId);
+      return;
+    }
+
+    if (step.kind === 'local') {
+      if (step.compensation) {
+        await this.runLocalCompensation(sagaId, step);
+      } else {
+        await this.popCompletedStep(sagaId, step.name);
+      }
+      return this.compensate(sagaId);
+    }
+
+    if (step.compensationCommand && step.buildCompensationCommand) {
+      await this.dispatchRemoteCompensation(sagaId, step);
+      return;
+    }
+
+    // sin compensación remota declarada → pop y seguir
+    await this.popCompletedStep(sagaId, step.name);
+    return this.compensate(sagaId);
+  }
+
+  private async runLocalCompensation(
+    sagaId: string,
+    step: LocalStep,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      const saga = await this.lockSaga(em, sagaId);
+      if (!saga || saga.status !== 'compensating') return;
+
+      const stack = saga.completed_steps;
+      if (stack[stack.length - 1] !== step.name) return; // idempotencia
+
+      await step.compensation!(em, saga.payload);
+
+      const newCompleted = stack.slice(0, -1);
+      await em.query(
+        `UPDATE saga_instance
+            SET completed_steps = $2::jsonb,
+                current_step = $3,
+                updated_at = now()
+          WHERE id = $1`,
+        [sagaId, JSON.stringify(newCompleted), newCompleted.length],
+      );
+
+      this.logger.log(`saga ${sagaId} ↩ ${step.name} compensado`);
+    });
+  }
+
+  private async dispatchRemoteCompensation(
+    sagaId: string,
+    step: RemoteStep,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      const saga = await this.lockSaga(em, sagaId);
+      if (!saga || saga.status !== 'compensating') return;
+
+      await em.query(
+        `UPDATE saga_instance
+            SET status = 'awaiting_compensation_response', updated_at = now()
+          WHERE id = $1`,
+        [sagaId],
+      );
+    });
+
+    const saga = await this.loadSaga(sagaId);
+    if (!saga) return;
+
+    await this.commandQueue.add(
+      step.compensationCommand!,
+      {
+        sagaId,
+        step: step.name,
+        command: step.compensationCommand,
+        phase: 'compensation' as const,
+        payload: step.buildCompensationCommand!(
+          saga.payload as unknown as RentalSagaPayload,
+        ),
+      },
+      { jobId: `${sagaId}:${step.name}:compensation` },
+    );
+
+    this.logger.log(
+      `saga ${sagaId} ↩ dispatch ${step.compensationCommand!} (step=${step.name})`,
+    );
+  }
+
+  private async popCompletedStep(
+    sagaId: string,
+    expectedName: string,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      const saga = await this.lockSaga(em, sagaId);
+      if (!saga) return;
+      const stack = saga.completed_steps;
+      if (stack[stack.length - 1] !== expectedName) return;
+
+      const newCompleted = stack.slice(0, -1);
+      await em.query(
+        `UPDATE saga_instance
+            SET completed_steps = $2::jsonb,
+                current_step = $3,
+                status = 'compensating',
+                updated_at = now()
+          WHERE id = $1`,
+        [sagaId, JSON.stringify(newCompleted), newCompleted.length],
+      );
+    });
+  }
+
   // ─── entrada desde el reply-worker ────────────────────────────────────
 
   async handleReply(reply: SagaReply): Promise<void> {
     const { sagaId, step, result } = reply;
+    const saga = await this.loadSaga(sagaId);
+    if (!saga) return;
 
-    if (result !== 'confirmed') {
-      // La compensación queda para la próxima iteración.
+    if (saga.status === 'awaiting_step_response') {
+      if (result === 'confirmed') {
+        await this.confirmForwardReply(sagaId, step);
+        this.logger.log(`saga ${sagaId} ← reply ${step} confirmed → resume`);
+        return this.advance(sagaId);
+      }
       this.logger.warn(
-        `saga ${sagaId} recibió reply "${result}" en step ${step} — compensación no implementada`,
+        `saga ${sagaId} ← reply ${step} rejected: ${reply.error ?? '(sin msg)'}`,
       );
-      return;
+      await this.markCompensating(
+        sagaId,
+        `${step}: ${reply.error ?? 'rejected'}`,
+      );
+      return this.compensate(sagaId);
     }
 
-    await this.dataSource.transaction(async (em) => {
-      const [saga] = await em.query(
-        `SELECT * FROM saga_instance WHERE id = $1 FOR UPDATE`,
-        [sagaId],
-      );
-      if (!saga) return;
+    if (saga.status === 'awaiting_compensation_response') {
+      await this.popCompletedStep(sagaId, step);
+      this.logger.log(`saga ${sagaId} ↩ reply ${step} → continue compensating`);
+      return this.compensate(sagaId);
+    }
 
-      // idempotencia: si ya avanzamos, ignoramos la respuesta duplicada.
-      if (saga.completed_steps.includes(step)) return;
+    this.logger.warn(
+      `saga ${sagaId} reply ${step} ignorada (status=${saga.status})`,
+    );
+  }
+
+  private async confirmForwardReply(
+    sagaId: string,
+    step: string,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (em) => {
+      const saga = await this.lockSaga(em, sagaId);
+      if (!saga) return;
+      if (saga.completed_steps.includes(step)) return; // idempotencia
       if (saga.status !== 'awaiting_step_response') return;
 
       const newCompleted = [...saga.completed_steps, step];
@@ -358,12 +566,20 @@ export class RentalSagaOrchestrator {
         [sagaId, saga.current_step + 1, JSON.stringify(newCompleted)],
       );
     });
-
-    this.logger.log(`saga ${sagaId} ← reply ${step} confirmed → resume`);
-    await this.advance(sagaId);
   }
 
   // ─── helpers ──────────────────────────────────────────────────────────
+
+  private async lockSaga(
+    em: EntityManager,
+    sagaId: string,
+  ): Promise<SagaRow | undefined> {
+    const rows = await em.query<SagaRow[]>(
+      `SELECT * FROM saga_instance WHERE id = $1 FOR UPDATE`,
+      [sagaId],
+    );
+    return rows[0];
+  }
 
   private async loadSaga(sagaId: string): Promise<SagaInstance | null> {
     return this.dataSource
@@ -379,5 +595,31 @@ export class RentalSagaOrchestrator {
       [sagaId],
     );
     this.logger.log(`saga ${sagaId} ✅ completed`);
+  }
+
+  private async markCompensating(
+    sagaId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE saga_instance
+          SET status = 'compensating',
+              last_error = $2,
+              updated_at = now()
+        WHERE id = $1
+          AND status IN ('running','awaiting_step_response')`,
+      [sagaId, reason],
+    );
+    this.logger.warn(`saga ${sagaId} ⚠ compensating: ${reason}`);
+  }
+
+  private async markFailed(sagaId: string): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE saga_instance
+          SET status = 'failed', updated_at = now()
+        WHERE id = $1 AND status = 'compensating'`,
+      [sagaId],
+    );
+    this.logger.warn(`saga ${sagaId} ❌ failed`);
   }
 }
