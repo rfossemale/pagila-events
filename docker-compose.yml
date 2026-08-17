@@ -70,6 +70,7 @@ services:
       - "3000:80"
     depends_on:
       - producer
+      - grafana
     restart: unless-stopped
 
   consumer:
@@ -99,5 +100,64 @@ services:
         condition: service_healthy
     restart: unless-stopped   
 
+  # ── Observabilidad ──────────────────────────────────────────────────────
+  # Exporter que traduce estadísticas de PostgreSQL a métricas Prometheus.
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://pagila:pagila@postgres:5432/pagila?sslmode=disable"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Exporter que traduce el INFO de Redis a métricas Prometheus.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.62.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Prometheus: hace pull de /metrics de producer, consumer y los exporters.
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - producer
+      - consumer
+    restart: unless-stopped
+
+  # Grafana: dashboards del sistema. Servido en subpath /grafana (vía nginx) y
+  # también directo en el puerto 3002. Datasource y dashboard se provisionan solos.
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # Acceso anónimo de sólo-lectura para poder ver el dashboard sin login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Servir bajo el subpath /grafana para exponerlo detrás de nginx.
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3002:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  prometheus-data:
+  grafana-data:

@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 import type { IncomingEvent } from '../types/index';
+import { MetricsService } from '../metrics/metrics.service';
 
 /**
  * Aplica un evento entrante a las tablas del consumer.
@@ -25,9 +26,13 @@ import type { IncomingEvent } from '../types/index';
 export class EventProcessorService {
   private readonly logger = new Logger(EventProcessorService.name);
 
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly metrics: MetricsService,
+  ) {}
 
   async process(evt: IncomingEvent): Promise<void> {
+    let result: 'applied' | 'duplicate' | 'stale' = 'applied';
     await this.dataSource.transaction(async (em) => {
       // 1) intentar registrar el evento como procesado.
       this.logger.log(
@@ -43,18 +48,22 @@ export class EventProcessorService {
       this.logger.log(`res.rowCount: ${res.rowCount}`);
       if (res.rowCount === 0) {
         this.logger.log(`dup ${evt.eventId}, descartado`);
+        result = 'duplicate';
         return;
       }
 
       // 3) primera vez → aplicar el efecto en la misma tx.
-      await this.applyEffect(em, evt);
+      result = await this.applyEffect(em, evt);
     });
+
+    // La métrica se registra tras el commit para no contar tx revertidas.
+    this.metrics.recordEvent(evt.eventType, result);
   }
 
   private async applyEffect(
     em: EntityManager,
     evt: IncomingEvent,
-  ): Promise<void> {
+  ): Promise<'applied' | 'stale'> {
     const aggId = evt.aggregateId;
     const incoming = evt.payload.version;
 
@@ -68,7 +77,7 @@ export class EventProcessorService {
       this.logger.log(
         `evento viejo v${incoming} (actual v${cur[0].version}), descartado`,
       );
-      return;
+      return 'stale';
     }
 
     // Aplicar el efecto según el tipo.
@@ -95,5 +104,7 @@ export class EventProcessorService {
        ON CONFLICT (aggregate_id) DO UPDATE SET version = $2`,
       [aggId, incoming],
     );
+
+    return 'applied';
   }
 }

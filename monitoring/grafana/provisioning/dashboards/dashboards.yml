@@ -1,0 +1,13 @@
+# Provider que carga los dashboards JSON desde el disco al arrancar Grafana.
+apiVersion: 1
+
+providers:
+  - name: pagila-events
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

@@ -23,6 +23,7 @@ El objetivo es mostrar, con código real y ejecutable, cómo se resuelven los pr
 | **Saga orquestada + compensación** | `producer/saga` + `consumer/saga` | Transacciones distribuidas con pasos locales/remotos y rollback por compensación. |
 | **Condición de carrera + lock pesimista** | `scripts/` + `rental.service.ts` | Demostrar y prevenir doble-alquiler del mismo ejemplar bajo concurrencia. |
 | **Escalado horizontal** | `docker-compose.yml` + `nginx/` | Balanceo round-robin de N réplicas del `producer` detrás de Nginx. |
+| **Observabilidad** | `monitoring/` + `/metrics` en cada servicio | Métricas Prometheus (HTTP, outbox, eventos) y dashboards en Grafana. |
 
 ---
 
@@ -82,9 +83,10 @@ pagila-events/
 │   ├── 06-consumer.sql     # Esquema del consumer (idempotencia + proyección)
 │   └── 10-saga-tabe.sql    # Tabla de instancias de saga
 ├── nginx/producer.conf     # Load balancer round-robin
-├── producer/               # Servicio de escritura (API + outbox + saga)
-├── consumer/               # Servicio de lectura (worker + proyección + saga)
-└── scripts/                # Reproductor de la condición de carrera
+├── monitoring/             # Prometheus (scrape) + Grafana (datasource + dashboard)
+├── producer/               # Servicio de escritura (API + outbox + saga + /metrics)
+├── consumer/               # Servicio de lectura (worker + proyección + saga + /metrics)
+└── scripts/                # Batería de tests + reproductor de la condición de carrera
 ```
 
 `producer` y `consumer` fueron integrados al monorepo con `git subtree`, por lo que su **historial de commits individual está preservado** dentro de este repo.
@@ -112,6 +114,8 @@ Esto levanta:
 | Consumer | `3101` | Servicio de lectura |
 | PostgreSQL | `5433` | Base Pagila (se inicializa sola con `db/init`) |
 | Redis | `6379` | Broker BullMQ |
+| Prometheus | `9090` | Recolección de métricas |
+| Grafana | `3002` | Dashboards (también en `/grafana`) |
 
 Para **escalar** el producer y ver el balanceo de Nginx en acción:
 
@@ -155,6 +159,30 @@ curl -X POST http://localhost:3000/api/rentals \
   -H 'Content-Type: application/json' \
   -d '{"filmId":1,"storeId":1,"customerId":1,"staffId":1}'
 ```
+
+---
+
+## Monitoreo (Prometheus + Grafana)
+
+El stack incluye observabilidad completa. Ambos servicios NestJS exponen
+métricas en formato Prometheus, y dos *exporters* aportan métricas de
+infraestructura:
+
+| Fuente | Endpoint | Qué expone |
+| --- | --- | --- |
+| Producer | `GET /api/metrics` | HTTP (rate/latencia), backlog del outbox (`outbox_pending_total`, `outbox_failed_total`, `outbox_oldest_pending_seconds`) y métricas de Node. |
+| Consumer | `GET /metrics` | HTTP, eventos procesados por resultado (`consumer_events_total{result}`) y métricas de Node. |
+| postgres-exporter | `:9187/metrics` | Conexiones, locks, tamaño de la base. |
+| redis-exporter | `:9121/metrics` | Memoria, clientes, comandos, keyspace. |
+
+**Prometheus** ([`monitoring/prometheus/prometheus.yml`](monitoring/prometheus/prometheus.yml)) scrapea los cuatro cada 15s (el producer vía DNS discovery, así descubre todas las réplicas al escalar).
+
+**Grafana** provisiona solo el datasource y un dashboard de overview (throughput HTTP, latencia p95, backlog del outbox, eventos/s del consumer y salud de Postgres/Redis).
+
+### 👉 Ver el dashboard
+
+- A través de Nginx (mismo host que la API): **http://localhost:3000/grafana** → dashboard *Pagila Events · Overview*.
+- O directo: **http://localhost:3002** (login `admin` / `admin`; el acceso de sólo-lectura es anónimo).
 
 ---
 

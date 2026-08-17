@@ -34,6 +34,7 @@ import { HealthController } from './controllers/health.controller';
 import { OutboxController } from './controllers/outbox.controller';
 import { OutboxCleanup } from './services/outbox/outbox-cleanup.service';
 import { SagaModule } from './saga/saga.module';
+import { MetricsModule } from './metrics/metrics.module';
 
 // SagaInstance queda en el root sólo para que el DataSource la descubra;
 // su repo, controller y providers viven en SagaModule.
@@ -73,6 +74,7 @@ const entities = [
     TypeOrmModule.forFeature(entities),
     ScheduleModule.forRoot(),
     SagaModule,
+    MetricsModule,
   ],
   controllers: [
     AppController,

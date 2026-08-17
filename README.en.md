@@ -23,6 +23,7 @@ The goal is to show, with real runnable code, how the hard problems of an event-
 | **Orchestrated saga + compensation** | `producer/saga` + `consumer/saga` | Distributed transactions with local/remote steps and rollback via compensation. |
 | **Race condition + pessimistic lock** | `scripts/` + `rental.service.ts` | Demonstrate and prevent double-renting the same copy under concurrency. |
 | **Horizontal scaling** | `docker-compose.yml` + `nginx/` | Round-robin balancing of N `producer` replicas behind Nginx. |
+| **Observability** | `monitoring/` + `/metrics` on each service | Prometheus metrics (HTTP, outbox, events) and Grafana dashboards. |
 
 ---
 
@@ -82,8 +83,9 @@ pagila-events/
 │   ├── 06-consumer.sql     # Consumer schema (idempotency + projection)
 │   └── 10-saga-tabe.sql    # Saga instances table
 ├── nginx/producer.conf     # Round-robin load balancer
-├── producer/               # Write service (API + outbox + saga)
-├── consumer/               # Read service (worker + projection + saga)
+├── monitoring/             # Prometheus (scrape) + Grafana (datasource + dashboard)
+├── producer/               # Write service (API + outbox + saga + /metrics)
+├── consumer/               # Read service (worker + projection + saga + /metrics)
 └── scripts/                # Test suite + race-condition reproducer
 ```
 
@@ -112,6 +114,8 @@ This brings up:
 | Consumer | `3101` | Read service |
 | PostgreSQL | `5433` | Pagila database (self-initializes via `db/init`) |
 | Redis | `6379` | BullMQ broker |
+| Prometheus | `9090` | Metrics collection |
+| Grafana | `3002` | Dashboards (also at `/grafana`) |
 
 To **scale** the producer and see Nginx balancing in action:
 
@@ -155,6 +159,29 @@ curl -X POST http://localhost:3000/api/rentals \
   -H 'Content-Type: application/json' \
   -d '{"filmId":1,"storeId":1,"customerId":1,"staffId":1}'
 ```
+
+---
+
+## Monitoring (Prometheus + Grafana)
+
+The stack ships with full observability. Both NestJS services expose Prometheus
+metrics, and two exporters add infrastructure metrics:
+
+| Source | Endpoint | What it exposes |
+| --- | --- | --- |
+| Producer | `GET /api/metrics` | HTTP (rate/latency), outbox backlog (`outbox_pending_total`, `outbox_failed_total`, `outbox_oldest_pending_seconds`) and Node metrics. |
+| Consumer | `GET /metrics` | HTTP, events processed by result (`consumer_events_total{result}`) and Node metrics. |
+| postgres-exporter | `:9187/metrics` | Connections, locks, database size. |
+| redis-exporter | `:9121/metrics` | Memory, clients, commands, keyspace. |
+
+**Prometheus** ([`monitoring/prometheus/prometheus.yml`](monitoring/prometheus/prometheus.yml)) scrapes all four every 15s (the producer via DNS discovery, so it finds every replica when scaling).
+
+**Grafana** auto-provisions the datasource and an overview dashboard (HTTP throughput, p95 latency, outbox backlog, consumer events/s and Postgres/Redis health).
+
+### 👉 View the dashboard
+
+- Through Nginx (same host as the API): **http://localhost:3000/grafana** → *Pagila Events · Overview* dashboard.
+- Or directly: **http://localhost:3002** (login `admin` / `admin`; read-only access is anonymous).
 
 ---
 
