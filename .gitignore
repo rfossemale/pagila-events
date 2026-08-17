@@ -15,3 +15,5 @@ npm-debug.log*
 
 # Sistema operativo
 .DS_Store
+
+./vscode/
