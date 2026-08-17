@@ -8,7 +8,7 @@ El repositorio es un **monorepo** con dos servicios NestJS (`producer` y `consum
 
 ## ¿Qué demuestra este proyecto?
 
-Este no es un CRUD más. El objetivo es mostrar, con código real y ejecutable, cómo se resuelven los problemas difíciles de un sistema orientado a eventos:
+El objetivo es mostrar, con código real y ejecutable, cómo se resuelven los problemas difíciles de un sistema orientado a eventos:
 
 | Concepto | Dónde vive | Qué resuelve |
 | --- | --- | --- |
@@ -176,6 +176,19 @@ Ver [scripts/README.md](scripts/README.md) para el detalle.
 ---
 
 ## Tests
+
+### Batería de integración end-to-end
+
+[`scripts/test-suite.mjs`](scripts/test-suite.mjs) es un runner autónomo que dispara **pedidos HTTP reales** contra el sistema levantado y verifica los efectos en la base: alta y devolución de rentals, drenado del outbox, proyección del consumer, idempotencia, orden por versión y concurrencia sin doble-booking.
+
+```bash
+docker compose up -d --build   # el stack debe estar corriendo
+node scripts/test-suite.mjs    # 21 passed · 0 failed
+```
+
+Ver [scripts/README.md](scripts/README.md) para el detalle de cada suite.
+
+### Unitarios / e2e por servicio
 
 Cada servicio trae su suite de Jest:
 
