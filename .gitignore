@@ -1,9 +1,8 @@
-# Subproyectos con su propio repositorio
-/producer
-/consumer
-
 # Dependencias
 node_modules/
+
+# Build output
+dist/
 
 # Logs
 *.log
@@ -15,5 +14,3 @@ npm-debug.log*
 
 # Sistema operativo
 .DS_Store
-
-./vscode/
