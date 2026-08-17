@@ -1,0 +1,1 @@
+ALTER TABLE rental ADD COLUMN status TEXT NOT NULL DEFAULT 'confirmed';

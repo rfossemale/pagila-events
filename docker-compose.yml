@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pagila # está usando user: 'postgres' definido en 00-init.sql
+      POSTGRES_PASSWORD: pagila
+      POSTGRES_DB: pagila
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pagila -d pagila"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+      # Corta en el stage `builder` (tiene devDependencies incluido @nestjs/cli),
+      # necesario para poder correr `npm run start:dev` con hot reload.
+      target: builder
+    environment:
+      # DB (Postgres corre en el network compose → hostname `postgres`, puerto interno 5432)
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: pagila
+      DB_PASSWORD: pagila
+      DB_NAME: pagila
+      # Redis (hostname `redis`)
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Nest
+      PORT: 3000
+      NODE_ENV: development
+    # Sin `ports:` para poder escalar (`--scale producer=N`) sin colisiones.
+    # `expose` documenta el puerto interno; el acceso al host va vía nginx.
+    expose:
+      - "3000"
+    volumes:
+      - ./producer/src:/app/src
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: npm run start:dev
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx/producer.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      # Único puerto expuesto al host: nginx balancea las réplicas del producer.
+      - "3000:80"
+    depends_on:
+      - producer
+    restart: unless-stopped
+
+  consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    environment:
+      # Misma BD que el producer (el consumer escribe en el schema `consumer`)
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_USER: pagila
+      DB_PASSWORD: pagila
+      DB_NAME: pagila
+      # Redis para el BullMQ Worker
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      # Nest
+      PORT: 3001
+      NODE_ENV: production
+    # Movido fuera del rango 3000-3099 para evitar colisión con `--scale producer=N`.
+    ports:
+      - "3101:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped   
+
+volumes:
+  pgdata:

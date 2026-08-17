@@ -1,0 +1,17 @@
+# Subproyectos con su propio repositorio
+/producer
+/consumer
+
+# Dependencias
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Entorno
+.env
+.env.*
+
+# Sistema operativo
+.DS_Store
