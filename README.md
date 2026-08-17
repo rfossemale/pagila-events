@@ -4,6 +4,8 @@ Sistema de ejemplo **event-driven** construido sobre la base de datos de muestra
 
 El repositorio es un **monorepo** con dos servicios NestJS (`producer` y `consumer`) que comparten una base PostgreSQL y un broker Redis, orquestados con Docker Compose.
 
+> 🇬🇧 English version: [README.en.md](README.en.md)
+
 ---
 
 ## ¿Qué demuestra este proyecto?
