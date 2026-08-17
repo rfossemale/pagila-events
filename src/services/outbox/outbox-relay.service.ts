@@ -23,6 +23,7 @@ export class OutboxRelayService {
   ) {}
 
   async onModuleInit() {
+    // Ver 07-listen-notify-trigger.ts ( LISTEN/NOTIFY )
     const clientConfig: ClientConfig = {
       host: process.env.DB_HOST ?? 'localhost',
       port: Number(process.env.DB_PORT ?? 5433),
@@ -85,24 +86,24 @@ export class OutboxRelayService {
     });
   }
 
-  //   private async publish(row: OutboxRow) {
-  //     this.logger.log(
-  //       `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
-  //     );
-  //     await fetch('http://localhost:3001/events', {
-  //       method: 'POST',
-  //       headers: { 'Content-Type': 'application/json' },
-  //       body: JSON.stringify({
-  //         eventId: row.id,
-  //         eventType: row.event_type,
-  //         aggregateId: row.aggregate_id,
-  //         payload: row.payload,
-  //       }),
-  //     }).then((r) => {
-  //       if (!r.ok) throw new Error(`consumer respondió ${r.status}`);
-  //     });
-  //   }
-  // }
+  private async publishToAPI(row: OutboxRow) {
+    this.logger.log(
+      `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
+    );
+    await fetch('http://localhost:3001/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        eventId: row.id,
+        eventType: row.event_type,
+        aggregateId: row.aggregate_id,
+        payload: row.payload,
+      }),
+    }).then((r) => {
+      if (!r.ok) throw new Error(`consumer respondió ${r.status}`);
+    });
+  }
+
   private async publish(row: OutboxRow) {
     this.logger.log(
       `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,

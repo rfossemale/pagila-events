@@ -16,7 +16,9 @@ import {
   CreateRentalResult,
   ReturnRentalResult,
 } from '../dto/create-rental.dto';
-
+// - código SQL estándar de unique_violation (PostgreSQL)
+// - no es portable a otros RDBMS
+const UNIQUE_VIOLATION_CODE = '23505';
 @Injectable()
 export class RentalService {
   private readonly logger = new Logger(RentalService.name);
@@ -24,15 +26,11 @@ export class RentalService {
   constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
 
   /**
-   * Alquila un ejemplar (inventory) de `filmId` en `storeId` para `customerId`,
-   * registrado por `staffId`. Todo transaccional.
-   *
-   * ⚠️ VERSIÓN NAIVE — SIN LOCK.
-   * "Disponible" = NO existe rental con return_date IS NULL para ese inventory.
+   * Nota:
    * Bajo concurrencia, dos transacciones pueden leer el mismo `inventory_id`
    * como disponible y crear dos rentals abiertos sobre el mismo ejemplar
    * (violación de la regla de negocio). Este comportamiento es intencional
-   * para demostrar la condición de carrera.
+   * para demostrar la condición de carrera. ( Codigo comentado )
    */
   async createRental(input: CreateRentalDto): Promise<CreateRentalResult> {
     const { filmId, storeId, customerId, staffId } = input;
@@ -96,13 +94,6 @@ export class RentalService {
         );
       }
       const inventoryId = rows[0].inventory_id;
-
-      // Pequeña ventana artificial para ampliar la race window y hacer
-      // reproducible el fallo con dos requests casi simultáneas.
-      // Quitar cuando se agregue el lock.
-      // await new Promise((r) => setTimeout(r, 100));
-
-      // 2) Tarifa del film para el payment.
       const film = await em.getRepository(Film).findOne({
         where: { filmId },
         select: { filmId: true, rentalRate: true },
@@ -112,7 +103,6 @@ export class RentalService {
       }
 
       try {
-        // 3) Crear rental (return_date = null → ejemplar queda "afuera").
         const now = new Date();
         const rentalRepo = em.getRepository(Rental);
         const rental = await rentalRepo.save(
@@ -125,7 +115,6 @@ export class RentalService {
           }),
         );
 
-        // 4) Registrar payment vinculado al rental.
         const paymentRepo = em.getRepository(Payment);
         const payment = await paymentRepo.save(
           paymentRepo.create({
@@ -152,7 +141,6 @@ export class RentalService {
               rentalDate: now.toISOString(),
               version: 1, // version inicial del agregado
             },
-            // status, attempts, created_at → defaults
           }),
         );
 
@@ -168,11 +156,11 @@ export class RentalService {
           rentalDate: rental.rentalDate,
         };
       } catch (err) {
-        // El .code === '23505' viene del driver pg, expuesto crudo en el error de TypeORM.
-        // Es el código SQL estándar de unique_violation — vale conocerlo
-        // ( esto es por la contraint definida en db/init/004-constraints.sql ), pero no es portable a otros RDBMS.
-        // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-        if (err instanceof QueryFailedError && (err as any).code === '23505') {
+        if (
+          err instanceof QueryFailedError &&
+          // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
+          (err as any).code === UNIQUE_VIOLATION_CODE
+        ) {
           throw new ConflictException(
             `El ejemplar ${inventoryId} ya fue alquilado por otra operación`,
           );

@@ -13,7 +13,7 @@ import { JobsOptions, Queue } from 'bullmq';
 @Injectable()
 export class RentalQueueService implements OnModuleDestroy {
   private readonly logger = new Logger(RentalQueueService.name);
-  static readonly QUEUE_NAME = 'rental';
+  static readonly QUEUE_NAME = process.env.QUEUE_NAME || 'rental';
 
   private readonly queue: Queue;
 
