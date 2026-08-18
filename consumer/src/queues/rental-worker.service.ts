@@ -1,10 +1,7 @@
-import {
-  Injectable,
-  Logger,
-  OnModuleDestroy,
-  OnModuleInit,
-} from '@nestjs/common';
+/* eslint-disable prettier/prettier */
+import { Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { Job, Worker } from 'bullmq';
+import { PinoLogger } from 'nestjs-pino';
 import { EventProcessorService } from '../services/event-processor.service';
 import type { IncomingEvent } from '../types/index';
 
@@ -29,10 +26,14 @@ const QUEUE_NAME = 'rental';
  */
 @Injectable()
 export class RentalWorkerService implements OnModuleInit, OnModuleDestroy {
-  private readonly logger = new Logger(RentalWorkerService.name);
   private worker!: Worker<IncomingEvent>;
 
-  constructor(private readonly processor: EventProcessorService) {}
+  constructor(
+    private readonly processor: EventProcessorService,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(RentalWorkerService.name);
+  }
 
   onModuleInit() {
     const connection = {
@@ -52,19 +53,28 @@ export class RentalWorkerService implements OnModuleInit, OnModuleDestroy {
     );
 
     this.worker.on('completed', (job) => {
-      this.logger.log(`✅ job ${job.id} (${job.name}) procesado`);
+      this.logger.info(
+        { jobId: job.id, name: job.name },
+        'job procesado',
+      );
     });
 
     this.worker.on('failed', (job, err) => {
       this.logger.error(
-        `❌ job ${job?.id} (${job?.name}) falló: ${err.message} — intento ${
-          job?.attemptsMade ?? '?'
-        }/${job?.opts.attempts ?? '?'}`,
+        {
+          jobId: job?.id,
+          name: job?.name,
+          attempt: job?.attemptsMade,
+          maxAttempts: job?.opts.attempts,
+          err,
+        },
+        'job falló',
       );
     });
 
-    this.logger.log(
-      `Worker "${QUEUE_NAME}" escuchando en ${connection.host}:${connection.port} (concurrency=5)`,
+    this.logger.info(
+      { queue: QUEUE_NAME, ...connection, concurrency: 5 },
+      'worker escuchando',
     );
   }
 

@@ -1,9 +1,10 @@
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
 /* eslint-disable @typescript-eslint/no-unsafe-call */
 import { Client, type ClientConfig } from 'pg';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { Interval } from '@nestjs/schedule';
+import { PinoLogger } from 'nestjs-pino';
 import { RentalQueueService } from '../../queues/rental-queue.service';
 
 type OutboxRow = {
@@ -15,12 +16,14 @@ type OutboxRow = {
 
 @Injectable()
 export class OutboxRelayService {
-  private readonly logger = new Logger(OutboxRelayService.name);
   private running = false;
   constructor(
     private readonly dataSource: DataSource,
     private readonly rentalQueue: RentalQueueService,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(OutboxRelayService.name);
+  }
 
   async onModuleInit() {
     // Ver 07-listen-notify-trigger.ts ( LISTEN/NOTIFY )
@@ -75,10 +78,14 @@ export class OutboxRelayService {
             [row.id],
           );
         } catch (err: unknown) {
-          const errorMessage =
-            err instanceof Error ? err.message : JSON.stringify(err);
           this.logger.error(
-            `Error publicando evento ${row.event_type} ${row.aggregate_id}: ${errorMessage}`,
+            {
+              outboxId: row.id,
+              eventType: row.event_type,
+              aggregateId: row.aggregate_id,
+              err,
+            },
+            'error publicando evento del outbox',
           );
           //  await this.handleFailure(em, row, err);
         }
@@ -87,8 +94,13 @@ export class OutboxRelayService {
   }
 
   private async publishToAPI(row: OutboxRow) {
-    this.logger.log(
-      `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
+    this.logger.debug(
+      {
+        outboxId: row.id,
+        eventType: row.event_type,
+        aggregateId: row.aggregate_id,
+      },
+      'publicando evento (HTTP)',
     );
     await fetch('http://localhost:3001/events', {
       method: 'POST',
@@ -105,8 +117,13 @@ export class OutboxRelayService {
   }
 
   private async publish(row: OutboxRow) {
-    this.logger.log(
-      `📤 ${row.event_type} ${row.aggregate_id}: ${JSON.stringify(row.payload)}`,
+    this.logger.debug(
+      {
+        outboxId: row.id,
+        eventType: row.event_type,
+        aggregateId: row.aggregate_id,
+      },
+      'publicando evento a la cola',
     );
     await this.rentalQueue.add(
       row.event_type,

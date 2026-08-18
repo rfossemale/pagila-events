@@ -35,6 +35,8 @@ import { OutboxController } from './controllers/outbox.controller';
 import { OutboxCleanup } from './services/outbox/outbox-cleanup.service';
 import { SagaModule } from './saga/saga.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { LoggerModule } from 'nestjs-pino';
+import { buildLoggerConfig } from './logging/logger.config';
 
 // SagaInstance queda en el root sólo para que el DataSource la descubra;
 // su repo, controller y providers viven en SagaModule.
@@ -60,6 +62,7 @@ const entities = [
 
 @Module({
   imports: [
+    LoggerModule.forRoot(buildLoggerConfig('producer')),
     TypeOrmModule.forRoot({
       type: 'postgres',
       host: process.env.DB_HOST ?? 'localhost',
@@ -69,7 +72,7 @@ const entities = [
       database: process.env.DB_NAME ?? 'pagila',
       entities,
       synchronize: false, // innegociable con esquema legacy
-      logging: ['query', 'error'],
+      logging: ['error'],
     }),
     TypeOrmModule.forFeature(entities),
     ScheduleModule.forRoot(),

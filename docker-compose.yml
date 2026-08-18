@@ -134,6 +134,29 @@ services:
       - consumer
     restart: unless-stopped
 
+  # Loki: almacén de logs (equivalente a Prometheus pero para líneas de log).
+  loki:
+    image: grafana/loki:3.1.1
+    command: -config.file=/etc/loki/loki-config.yml
+    volumes:
+      - ./monitoring/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+
+  # Promtail: descubre los contenedores del stack y empuja sus logs a Loki.
+  promtail:
+    image: grafana/promtail:3.1.1
+    command: -config.file=/etc/promtail/promtail-config.yml
+    volumes:
+      - ./monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      # Socket de Docker: Promtail lee los logs vía la API del daemon.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
   # Grafana: dashboards del sistema. Servido en subpath /grafana (vía nginx) y
   # también directo en el puerto 3002. Datasource y dashboard se provisionan solos.
   grafana:
@@ -155,9 +178,11 @@ services:
       - "3002:3000"
     depends_on:
       - prometheus
+      - loki
     restart: unless-stopped
 
 volumes:
   pgdata:
   prometheus-data:
   grafana-data:
+  loki-data:

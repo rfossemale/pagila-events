@@ -9,11 +9,14 @@ import { EventProcessorService } from './services/event-processor.service';
 import { RentalWorkerService } from './queues/rental-worker.service';
 import { SagaModule } from './saga/saga.module';
 import { MetricsModule } from './metrics/metrics.module';
+import { LoggerModule } from 'nestjs-pino';
+import { buildLoggerConfig } from './logging/logger.config';
 
 const entities = [InventoryAvailability, AggregateVersion, ProcessedEvent];
 
 @Module({
   imports: [
+    LoggerModule.forRoot(buildLoggerConfig('consumer')),
     TypeOrmModule.forRoot({
       type: 'postgres',
       host: process.env.DB_HOST ?? 'localhost',

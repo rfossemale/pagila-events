@@ -1,5 +1,6 @@
-import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { JobsOptions, Queue } from 'bullmq';
+import { PinoLogger } from 'nestjs-pino';
 
 /**
  * Wrapper Nest sobre una BullMQ Queue.
@@ -12,12 +13,12 @@ import { JobsOptions, Queue } from 'bullmq';
  */
 @Injectable()
 export class RentalQueueService implements OnModuleDestroy {
-  private readonly logger = new Logger(RentalQueueService.name);
   static readonly QUEUE_NAME = process.env.QUEUE_NAME || 'rental';
 
   private readonly queue: Queue;
 
-  constructor() {
+  constructor(private readonly logger: PinoLogger) {
+    this.logger.setContext(RentalQueueService.name);
     const host = process.env.REDIS_HOST ?? 'localhost';
     const port = Number(process.env.REDIS_PORT ?? 6379);
 
@@ -31,8 +32,9 @@ export class RentalQueueService implements OnModuleDestroy {
       },
     });
 
-    this.logger.log(
-      `Queue "${RentalQueueService.QUEUE_NAME}" lista en ${host}:${port}`,
+    this.logger.info(
+      { queue: RentalQueueService.QUEUE_NAME, host, port },
+      'queue lista',
     );
   }
 

@@ -1,8 +1,9 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment */
 /* eslint-disable @typescript-eslint/no-unsafe-member-access */
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
+import { PinoLogger } from 'nestjs-pino';
 import type { IncomingEvent } from '../types/index';
 import { MetricsService } from '../metrics/metrics.service';
 
@@ -24,37 +25,52 @@ import { MetricsService } from '../metrics/metrics.service';
  */
 @Injectable()
 export class EventProcessorService {
-  private readonly logger = new Logger(EventProcessorService.name);
-
   constructor(
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly metrics: MetricsService,
-  ) {}
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(EventProcessorService.name);
+  }
 
   async process(evt: IncomingEvent): Promise<void> {
+    const log = {
+      eventId: evt.eventId,
+      eventType: evt.eventType,
+      aggregateId: evt.aggregateId,
+      version: evt.payload.version,
+    };
     let result: 'applied' | 'duplicate' | 'stale' = 'applied';
-    await this.dataSource.transaction(async (em) => {
-      // 1) intentar registrar el evento como procesado.
-      this.logger.log(
-        `procesando ${evt.eventType} \n ${evt.aggregateId} \n v${evt.payload.version}`,
-      );
-      const res = await em.query(
-        `INSERT INTO consumer.processed_events (event_id)
-         VALUES ($1) ON CONFLICT DO NOTHING`,
-        [evt.eventId],
-      );
 
-      // 2) si no insertó nada, ya fue procesado → descartar.
-      this.logger.log(`res.rowCount: ${res.rowCount}`);
-      if (res.rowCount === 0) {
-        this.logger.log(`dup ${evt.eventId}, descartado`);
-        result = 'duplicate';
-        return;
-      }
+    try {
+      await this.dataSource.transaction(async (em) => {
+        this.logger.debug(log, 'procesando evento');
 
-      // 3) primera vez → aplicar el efecto en la misma tx.
-      result = await this.applyEffect(em, evt);
-    });
+        // 1) intentar registrar el evento como procesado (candado de idempotencia).
+        const res = await em.query(
+          `INSERT INTO consumer.processed_events (event_id)
+           VALUES ($1) ON CONFLICT DO NOTHING`,
+          [evt.eventId],
+        );
+
+        // 2) si no insertó nada, ya fue procesado → descartar.
+        if (res.rowCount === 0) {
+          result = 'duplicate';
+          this.logger.debug(log, 'evento duplicado, descartado');
+          return;
+        }
+
+        // 3) primera vez → aplicar el efecto en la misma tx.
+        result = await this.applyEffect(em, evt);
+      });
+    } catch (err) {
+      this.logger.error({ ...log, err }, 'error procesando evento');
+      throw err;
+    }
+
+    if (result === 'applied') {
+      this.logger.info(log, 'evento aplicado');
+    }
 
     // La métrica se registra tras el commit para no contar tx revertidas.
     this.metrics.recordEvent(evt.eventType, result);
@@ -74,8 +90,9 @@ export class EventProcessorService {
 
     // Guard de orden: descartar si llegó algo viejo o igual.
     if (cur.length && incoming !== undefined && incoming <= cur[0].version) {
-      this.logger.log(
-        `evento viejo v${incoming} (actual v${cur[0].version}), descartado`,
+      this.logger.warn(
+        { aggregateId: aggId, incoming, current: cur[0].version },
+        'evento fuera de orden, descartado',
       );
       return 'stale';
     }

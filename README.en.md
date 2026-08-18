@@ -23,7 +23,7 @@ The goal is to show, with real runnable code, how the hard problems of an event-
 | **Orchestrated saga + compensation** | `producer/saga` + `consumer/saga` | Distributed transactions with local/remote steps and rollback via compensation. |
 | **Race condition + pessimistic lock** | `scripts/` + `rental.service.ts` | Demonstrate and prevent double-renting the same copy under concurrency. |
 | **Horizontal scaling** | `docker-compose.yml` + `nginx/` | Round-robin balancing of N `producer` replicas behind Nginx. |
-| **Observability** | `monitoring/` + `/metrics` on each service | Prometheus metrics (HTTP, outbox, events) and Grafana dashboards. |
+| **Observability** | `monitoring/` + `/metrics` on each service | Prometheus metrics (HTTP, outbox, events), centralized logs with Loki/Promtail and Grafana dashboards. |
 
 ---
 
@@ -83,7 +83,7 @@ pagila-events/
 │   ├── 06-consumer.sql     # Consumer schema (idempotency + projection)
 │   └── 10-saga-tabe.sql    # Saga instances table
 ├── nginx/producer.conf     # Round-robin load balancer
-├── monitoring/             # Prometheus (scrape) + Grafana (datasource + dashboard)
+├── monitoring/             # Prometheus + Grafana + Loki/Promtail (metrics & logs)
 ├── producer/               # Write service (API + outbox + saga + /metrics)
 ├── consumer/               # Read service (worker + projection + saga + /metrics)
 └── scripts/                # Test suite + race-condition reproducer
@@ -116,6 +116,7 @@ This brings up:
 | Redis | `6379` | BullMQ broker |
 | Prometheus | `9090` | Metrics collection |
 | Grafana | `3002` | Dashboards (also at `/grafana`) |
+| Loki | `3100` | Log store (collected by Promtail) |
 
 To **scale** the producer and see Nginx balancing in action:
 
@@ -162,10 +163,11 @@ curl -X POST http://localhost:3000/api/rentals \
 
 ---
 
-## Monitoring (Prometheus + Grafana)
+## Monitoring (Prometheus + Grafana + Loki)
 
-The stack ships with full observability. Both NestJS services expose Prometheus
-metrics, and two exporters add infrastructure metrics:
+The stack ships with full observability: **metrics** (Prometheus) and **logs**
+(Loki). Both NestJS services expose Prometheus metrics, and two exporters add
+infrastructure metrics:
 
 | Source | Endpoint | What it exposes |
 | --- | --- | --- |
@@ -176,11 +178,16 @@ metrics, and two exporters add infrastructure metrics:
 
 **Prometheus** ([`monitoring/prometheus/prometheus.yml`](monitoring/prometheus/prometheus.yml)) scrapes all four every 15s (the producer via DNS discovery, so it finds every replica when scaling).
 
-**Grafana** auto-provisions the datasource and an overview dashboard (HTTP throughput, p95 latency, outbox backlog, consumer events/s and Postgres/Redis health).
+**Logs (Pino + Loki + Promtail):** both NestJS services log in **structured JSON** with [Pino](https://getpino.io) (`nestjs-pino`): every line carries `level`, `time`, `app`, the `context` (class) and a `reqId` that **correlates** all lines of a single HTTP request with its business log. [Promtail](monitoring/promtail/promtail-config.yml) discovers the stack containers via the Docker API and ships their `stdout`/`stderr` to [Loki](monitoring/loki/loki-config.yml), labeling every line with `service`. In Loki you filter with `| json` (e.g. `{service="producer"} | json | level="error"`). Locally, `LOG_PRETTY=1` enables pretty colored output.
 
-### 👉 View the dashboard
+**Grafana** auto-provisions the datasources (Prometheus + Loki) and two dashboards:
 
-- Through Nginx (same host as the API): **http://localhost:3000/grafana** → *Pagila Events · Overview* dashboard.
+- *Pagila Events · Overview* — HTTP throughput, p95 latency, outbox backlog, consumer events/s and Postgres/Redis health.
+- *Pagila Events · Logs* — log volume per service, error/warning counter and a live logs panel with per-service and text filters.
+
+### 👉 View the dashboards
+
+- Through Nginx (same host as the API): **http://localhost:3000/grafana** → *Overview* and *Logs*.
 - Or directly: **http://localhost:3002** (login `admin` / `admin`; read-only access is anonymous).
 
 ---

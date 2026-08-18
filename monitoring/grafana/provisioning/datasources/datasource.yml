@@ -9,3 +9,14 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: true
+
+  - name: Loki
+    type: loki
+    uid: loki
+    access: proxy
+    url: http://loki:3100
+    editable: true
+    jsonData:
+      # Enlaza los logs con las métricas (mismo rango temporal en Explore).
+      maxLines: 1000
+

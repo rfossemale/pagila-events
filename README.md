@@ -23,7 +23,7 @@ El objetivo es mostrar, con código real y ejecutable, cómo se resuelven los pr
 | **Saga orquestada + compensación** | `producer/saga` + `consumer/saga` | Transacciones distribuidas con pasos locales/remotos y rollback por compensación. |
 | **Condición de carrera + lock pesimista** | `scripts/` + `rental.service.ts` | Demostrar y prevenir doble-alquiler del mismo ejemplar bajo concurrencia. |
 | **Escalado horizontal** | `docker-compose.yml` + `nginx/` | Balanceo round-robin de N réplicas del `producer` detrás de Nginx. |
-| **Observabilidad** | `monitoring/` + `/metrics` en cada servicio | Métricas Prometheus (HTTP, outbox, eventos) y dashboards en Grafana. |
+| **Observabilidad** | `monitoring/` + `/metrics` en cada servicio | Métricas Prometheus (HTTP, outbox, eventos), logs centralizados con Loki/Promtail y dashboards en Grafana. |
 
 ---
 
@@ -83,7 +83,7 @@ pagila-events/
 │   ├── 06-consumer.sql     # Esquema del consumer (idempotencia + proyección)
 │   └── 10-saga-tabe.sql    # Tabla de instancias de saga
 ├── nginx/producer.conf     # Load balancer round-robin
-├── monitoring/             # Prometheus (scrape) + Grafana (datasource + dashboard)
+├── monitoring/             # Prometheus + Grafana + Loki/Promtail (métricas y logs)
 ├── producer/               # Servicio de escritura (API + outbox + saga + /metrics)
 ├── consumer/               # Servicio de lectura (worker + proyección + saga + /metrics)
 └── scripts/                # Batería de tests + reproductor de la condición de carrera
@@ -116,6 +116,7 @@ Esto levanta:
 | Redis | `6379` | Broker BullMQ |
 | Prometheus | `9090` | Recolección de métricas |
 | Grafana | `3002` | Dashboards (también en `/grafana`) |
+| Loki | `3100` | Almacén de logs (Promtail los recolecta) |
 
 Para **escalar** el producer y ver el balanceo de Nginx en acción:
 
@@ -162,11 +163,11 @@ curl -X POST http://localhost:3000/api/rentals \
 
 ---
 
-## Monitoreo (Prometheus + Grafana)
+## Monitoreo (Prometheus + Grafana + Loki)
 
-El stack incluye observabilidad completa. Ambos servicios NestJS exponen
-métricas en formato Prometheus, y dos *exporters* aportan métricas de
-infraestructura:
+El stack incluye observabilidad completa: **métricas** (Prometheus) y **logs**
+(Loki). Ambos servicios NestJS exponen métricas en formato Prometheus, y dos
+*exporters* aportan métricas de infraestructura:
 
 | Fuente | Endpoint | Qué expone |
 | --- | --- | --- |
@@ -177,11 +178,16 @@ infraestructura:
 
 **Prometheus** ([`monitoring/prometheus/prometheus.yml`](monitoring/prometheus/prometheus.yml)) scrapea los cuatro cada 15s (el producer vía DNS discovery, así descubre todas las réplicas al escalar).
 
-**Grafana** provisiona solo el datasource y un dashboard de overview (throughput HTTP, latencia p95, backlog del outbox, eventos/s del consumer y salud de Postgres/Redis).
+**Logs (Pino + Loki + Promtail):** ambos servicios NestJS loguean en **JSON estructurado** con [Pino](https://getpino.io) (`nestjs-pino`): cada línea lleva `level`, `time`, `app`, el `context` (clase) y un `reqId` que **correlaciona** todas las líneas de una misma petición HTTP con su log de negocio. [Promtail](monitoring/promtail/promtail-config.yml) descubre los contenedores del stack vía la API de Docker y empuja su `stdout`/`stderr` a [Loki](monitoring/loki/loki-config.yml), etiquetando cada línea con `service`. En Loki se filtran con `| json` (p. ej. `{service="producer"} | json | level="error"`). En local, `LOG_PRETTY=1` activa salida legible con colores.
 
-### 👉 Ver el dashboard
+**Grafana** provisiona solos los datasources (Prometheus + Loki) y dos dashboards:
 
-- A través de Nginx (mismo host que la API): **http://localhost:3000/grafana** → dashboard *Pagila Events · Overview*.
+- *Pagila Events · Overview* — throughput HTTP, latencia p95, backlog del outbox, eventos/s del consumer y salud de Postgres/Redis.
+- *Pagila Events · Logs* — volumen de logs por servicio, contador de errores/warnings y un panel de logs en vivo con filtro por servicio y texto.
+
+### 👉 Ver los dashboards
+
+- A través de Nginx (mismo host que la API): **http://localhost:3000/grafana** → *Overview* y *Logs*.
 - O directo: **http://localhost:3002** (login `admin` / `admin`; el acceso de sólo-lectura es anónimo).
 
 ---

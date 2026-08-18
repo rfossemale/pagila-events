@@ -2,11 +2,11 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
-  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryFailedError } from 'typeorm';
+import { PinoLogger } from 'nestjs-pino';
 import { Film } from '../entities/film.entity';
 import { Payment } from '../entities/payment.entity';
 import { Rental } from '../entities/rental.entity';
@@ -21,9 +21,12 @@ import {
 const UNIQUE_VIOLATION_CODE = '23505';
 @Injectable()
 export class RentalService {
-  private readonly logger = new Logger(RentalService.name);
-
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly logger: PinoLogger,
+  ) {
+    this.logger.setContext(RentalService.name);
+  }
 
   /**
    * Nota:
@@ -144,8 +147,17 @@ export class RentalService {
           }),
         );
 
-        this.logger.log(
-          `Rental ${rental.rentalId} creado: inventory=${inventoryId}, film=${filmId}, store=${storeId}, customer=${customerId}, staff=${staffId}, amount=${payment.amount}`,
+        this.logger.info(
+          {
+            rentalId: rental.rentalId,
+            inventoryId,
+            filmId,
+            storeId,
+            customerId,
+            staffId,
+            amount: payment.amount,
+          },
+          'rental creado',
         );
 
         return {
@@ -246,8 +258,14 @@ export class RentalService {
         }),
       );
 
-      this.logger.log(
-        `Rental ${rentalId} devuelto: inventory=${row.inventory_id}, film=${row.film_id}, store=${row.store_id}`,
+      this.logger.info(
+        {
+          rentalId,
+          inventoryId: row.inventory_id,
+          filmId: row.film_id,
+          storeId: row.store_id,
+        },
+        'rental devuelto',
       );
 
       return {

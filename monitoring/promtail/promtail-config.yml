@@ -1,0 +1,41 @@
+# Promtail: descubre los contenedores del stack vía la API de Docker y envía
+# sus logs (stdout/stderr) a Loki. Usa `docker_sd_configs`, así que sólo
+# necesita montar el socket de Docker (funciona en Docker Desktop / macOS).
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      # Sólo contenedores de ESTE proyecto compose (evita ruido de otros stacks).
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        regex: pagila-events
+        action: keep
+      # Etiqueta `service` = nombre del servicio en docker-compose.
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_service']
+        target_label: service
+      # Etiqueta `container` = nombre del contenedor (sin el `/` inicial).
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_label_com_docker_compose_project']
+        target_label: project
+    pipeline_stages:
+      # Marca como nivel=error las líneas que parezcan errores (para dashboards).
+      - match:
+          selector: '{project="pagila-events"}'
+          stages:
+            - regex:
+                expression: '(?i)(?P<lvl>error|warn|exception|fatal)'
+            - labels:
+                level: lvl
