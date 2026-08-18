@@ -6,7 +6,10 @@ Este directorio contiene dos cosas:
    que valida que toda la arquitectura funciona (alta y devolución de rentals,
    outbox, proyección del consumer, idempotencia, orden por versión y
    concurrencia sin doble-booking).
-2. **`race-*`** — scripts enfocados para **reproducir/observar la race
+2. **`load-simulation.mjs`** — un **simulador de tráfico dinámico** que genera
+   carga HTTP real con oleadas (rampa, pico, spike, enfriamiento) para observar
+   el sistema bajo estrés en Grafana/Prometheus.
+3. **`race-*`** — scripts enfocados para **reproducir/observar la race
    condition** en `POST /rentals` de forma manual.
 
 ## Requisitos
@@ -47,7 +50,43 @@ las veces que quieras. Overrides por entorno: `API_URL`, `CONSUMER_URL`,
 
 ---
 
-## 🏁 Demo manual de la race condition
+## � Simulador de tráfico dinámico: `load-simulation.mjs`
+
+Genera **carga HTTP real** contra el `producer` durante ~2 minutos siguiendo un
+**perfil de fases** que sube y baja el RPS objetivo, para poder visualizar el
+sistema bajo estrés en Grafana/Prometheus (throughput, p95, backlog del outbox,
+eventos/s del consumer, Postgres/Redis).
+
+```bash
+node scripts/load-simulation.mjs
+```
+
+Cada operación es un ciclo de negocio real: **alquilar** (baja disponibilidad) o
+**devolver** (la restaura). Mantiene un pool de rentals abiertos y mezcla ambas,
+así la proyección `inventory_availability` "respira". Algunos `409` (sin stock)
+son esperados. Al terminar (o con Ctrl-C) **devuelve los rentals que queden
+abiertos**.
+
+Fases del perfil: `warm-up → ramp-up → peak → valley → SPIKE → recovery →
+cool-down`. Overrides por entorno:
+
+| Variable | Default | Descripción |
+| --- | --- | --- |
+| `DURATION_SEC` | `120` | Duración total de la simulación. |
+| `PEAK_RPS` | `80` | RPS del pico/spike. |
+| `MAX_INFLIGHT` | `250` | Tope de peticiones simultáneas. |
+| `RETURN_BIAS` | `0.45` | Probabilidad base de devolver vs. alquilar. |
+
+```bash
+# Estrés fuerte de 3 minutos con pico de 120 rps:
+DURATION_SEC=180 PEAK_RPS=120 node scripts/load-simulation.mjs
+```
+
+> 📊 Mientras corre, abrí el dashboard en **http://localhost:3000/grafana**.
+
+---
+
+## �🏁 Demo manual de la race condition
 
 > Los scripts `race-*` asumen que querés **observar** el comportamiento bajo
 > concurrencia paso a paso. La Suite 6 de `test-suite.mjs` ya cubre esto de
